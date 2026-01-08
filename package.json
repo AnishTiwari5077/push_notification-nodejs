@@ -1,0 +1,26 @@
+{
+  "name": "push-notification-server",
+  "version": "1.0.0",
+  "description": "Standalone Node.js server for Firebase push notifications",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "docker:build": "docker build -t push-notification-server .",
+    "docker:run": "docker run -p 3000:3000 push-notification-server"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "firebase-admin": "^11.11.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "node-cron": "^3.0.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": ["firebase", "push-notifications", "nodejs", "fcm"],
+  "author": "",
+  "license": "MIT"
+}
