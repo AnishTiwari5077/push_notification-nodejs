@@ -1,3 +1,6 @@
+// ============================================================================
+// FIXED notificationservice.js
+// ============================================================================
 const { getFirestore, getMessaging } = require('./firebase');
 const cron = require('node-cron');
 
@@ -5,363 +8,419 @@ class NotificationService {
   constructor() {
     this.firestore = getFirestore();
     this.messaging = getMessaging();
-    this.eventListeners = new Map();
+    this.eventCache = new Map(); // Cache to track event changes
   }
 
-  /**
-   * Send notification to all users (topic)
-   */
+  /* =========================================================
+   * SEND TO ALL USERS (TOPIC)
+   * =======================================================*/
   async sendToAll(title, body, data = {}) {
-    try {
-      const message = {
-        notification: {
-          title,
-          body,
-        },
-        data: {
-          ...data,
-          type: 'announcement',
-          timestamp: new Date().toISOString(),
-        },
-        android: {
-          priority: 'high',
-          notification: {
-            channelId: 'events_channel',
-            sound: 'default',
-          },
-        },
-        apns: {
-          payload: {
-            aps: {
-              sound: 'default',
-              badge: 1,
-            },
-          },
-        },
-        topic: 'all_users',
-      };
-
-      const response = await this.messaging.send(message);
-
-      // Log the notification
-      await this.firestore.collection('notification_logs').add({
-        title,
-        body,
-        data,
-        type: 'manual',
-        sentAt: new Date(),
-        target: 'all_users',
-        success: true,
-        messageId:  response.messageId,
-        sentBy: 'server',
-      });
-
-      return {
-        success: true,
-        messageId: response.messageId,
-        response,
-      };
-    } catch (error) {
-      console.error('❌ Error sending notification:', error);
-      
-      // Log error
-      await this.firestore.collection('notification_errors').add({
-        title,
-        body,
-        error: error.message,
-        timestamp: new Date(),
-      });
-
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Send notification to specific device token
-   */
-  async sendToDevice(token, title, body, data = {}) {
     try {
       const message = {
         notification: { title, body },
         data: {
           ...data,
-          type: 'direct',
+          type: data.type || 'announcement',
           timestamp: new Date().toISOString(),
-        },
-        token,
-      };
-
-      const response = await this.messaging.send(message);
-      return {
-        success: true,
-        messageId: response.messageId,
-      };
-    } catch (error) {
-      console.error('❌ Error sending to device:', error);
-      return {
-        success: false,
-        error: error.message,
-      };
-    }
-  }
-
-  /**
-   * Send notification when new event is created
-   */
-  async sendNewEventNotification(event) {
-    try {
-      const eventDate = event.dateTime.toDate ? event.dateTime.toDate() : new Date(event.dateTime);
-      const formattedDate = this.formatEventDate(eventDate);
-
-      const message = {
-        notification: {
-          title: `🎉 New Event: ${event.title}`,
-          body: `${formattedDate} • ${event.location}`,
-        },
-        data: {
-          type: 'new_event',
-          eventId: event.id || '',
-          title: event.title,
-          date: eventDate.toISOString(),
-          location: event.location,
-          route: '/events',
-          image: event.imageUrl || '',
+          click_action: 'FLUTTER_NOTIFICATION_CLICK',
         },
         android: {
           priority: 'high',
           notification: {
             channelId: 'events_channel',
             sound: 'default',
-            imageUrl: event.imageUrl || null,
+            imageUrl: data.imageUrl || null,
           },
         },
         apns: {
           payload: {
-            aps: {
-              alert: {
-                title: `🎉 New Event: ${event.title}`,
-                body: `${formattedDate} • ${event.location}`,
-              },
-              sound: 'default',
+            aps: { 
+              sound: 'default', 
               badge: 1,
+              'mutable-content': 1,
             },
           },
           fcm_options: {
-            image: event.imageUrl || null,
+            image: data.imageUrl || null,
           },
         },
         topic: 'all_users',
       };
 
       const response = await this.messaging.send(message);
+      console.log('✅ Notification sent to all users:', title);
 
-      // Log successful notification
       await this.firestore.collection('notification_logs').add({
-        eventId: event.id,
-        eventTitle: event.title,
-        type: 'new_event',
+        title,
+        body,
+        data,
+        success: true,
         sentAt: new Date(),
         target: 'all_users',
-        success: true,
-        messageId:response.messageId,
+        messageId: response,
       });
 
-      console.log(`✅ Notification sent for event: ${event.title}`);
-      return response;
+      return { success: true, messageId: response };
     } catch (error) {
-      console.error(`❌ Error sending event notification:`, error);
+      console.error('❌ Error sending notification:', error);
       
       await this.firestore.collection('notification_errors').add({
-        eventId: event.id,
-        eventTitle: event.title,
+        title,
+        body,
         error: error.message,
-        timestamp: new Date(),
+        stack: error.stack,
+        sentAt: new Date(),
       });
       
       throw error;
     }
   }
 
-  /**
-   * Start listening for new events in Firestore
-   */
+  /* =========================================================
+   * NEW EVENT NOTIFICATION
+   * =======================================================*/
+  async sendNewEventNotification(event) {
+    try {
+      const eventDate = this.toDate(event.dateTime);
+      const formattedDate = this.formatEventDate(eventDate);
+
+      console.log(`📢 Sending NEW EVENT notification: ${event.title}`);
+
+      await this.sendToAll(
+        `🎉 New Event: ${event.title}`,
+        `${formattedDate} • ${event.location}`,
+        {
+          type: 'new_event',
+          eventId: event.id,
+          route: 'events',
+          imageUrl: event.imageUrl || '',
+        }
+      );
+
+      // Save to event_notifications to track this event
+      await this.firestore.collection('event_notifications').doc(event.id).set({
+        eventId: event.id,
+        eventTitle: event.title,
+        type: 'new_event',
+        lastNotifiedDate: event.dateTime,
+        notifiedAt: new Date(),
+      });
+
+      console.log('✅ New event notification sent successfully');
+    } catch (error) {
+      console.error('❌ Error sending new event notification:', error);
+    }
+  }
+
+  /* =========================================================
+   * EVENT DATE MODIFIED NOTIFICATION
+   * =======================================================*/
+  async sendEventDateChangedNotification(event, oldDateTime, newDateTime) {
+    try {
+      const oldDate = this.toDate(oldDateTime);
+      const newDate = this.toDate(newDateTime);
+      
+      const oldFormatted = this.formatEventDate(oldDate);
+      const newFormatted = this.formatEventDate(newDate);
+
+      console.log(`📅 Sending DATE CHANGED notification for: ${event.title}`);
+      console.log(`   Old: ${oldFormatted}`);
+      console.log(`   New: ${newFormatted}`);
+
+      await this.sendToAll(
+        `⏰ Event Rescheduled: ${event.title}`,
+        `New Date: ${newFormatted}\nPrevious: ${oldFormatted}`,
+        {
+          type: 'event_rescheduled',
+          eventId: event.id,
+          route: 'events',
+          imageUrl: event.imageUrl || '',
+          oldDate: oldFormatted,
+          newDate: newFormatted,
+        }
+      );
+
+      // Update the tracked date
+      await this.firestore.collection('event_notifications').doc(event.id).set({
+        eventId: event.id,
+        eventTitle: event.title,
+        type: 'date_modified',
+        lastNotifiedDate: event.dateTime,
+        notifiedAt: new Date(),
+        oldDate: oldDateTime,
+        newDate: newDateTime,
+      }, { merge: true });
+
+      console.log('✅ Date changed notification sent successfully');
+    } catch (error) {
+      console.error('❌ Error sending date changed notification:', error);
+    }
+  }
+
+  /* =========================================================
+   * FIRESTORE EVENT LISTENER - FIXED VERSION
+   * =======================================================*/
   startEventListener() {
     console.log('👂 Starting Firestore event listener...');
 
-    // Listen to events collection
-    const eventsRef = this.firestore.collection('events');
-    
-    eventsRef.onSnapshot((snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type === 'added') {
-          const event = {
-            id: change.doc.id,
-            ...change.doc.data(),
-          };
+    const unsubscribe = this.firestore
+      .collection('events')
+      .onSnapshot(
+        async (snapshot) => {
+          console.log(`📊 Received ${snapshot.docChanges().length} changes`);
 
-          console.log(`🎯 New event detected: ${event.title}`);
-
-          // Check if event is active and future
-          if (event.isActive) {
-            const eventDate = event.dateTime.toDate ? event.dateTime.toDate() : new Date(event.dateTime);
-            if (eventDate > new Date()) {
-              // Check if already notified
-              const alreadyNotified = await this.checkIfAlreadyNotified(event.id);
+          for (const change of snapshot.docChanges()) {
+            try {
+              const event = { id: change.doc.id, ...change.doc.data() };
               
-              if (!alreadyNotified) {
-                // Send notification
-                await this.sendNewEventNotification(event);
-                
-                // Mark as notified
-                await this.markAsNotified(event.id);
+              // Skip inactive events or past events
+              if (!event.isActive) {
+                console.log(`⏭️  Skipping inactive event: ${event.title}`);
+                continue;
               }
+
+              const eventDate = this.toDate(event.dateTime);
+              if (eventDate <= new Date()) {
+                console.log(`⏭️  Skipping past event: ${event.title}`);
+                continue;
+              }
+
+              /* ---------- NEW EVENT ---------- */
+              if (change.type === 'added') {
+                console.log(`🆕 New event detected: ${event.title}`);
+                
+                // Check if we already sent notification for this event
+                const existingNotification = await this.firestore
+                  .collection('event_notifications')
+                  .doc(event.id)
+                  .get();
+
+                if (!existingNotification.exists) {
+                  await this.sendNewEventNotification(event);
+                  // Cache the event
+                  this.eventCache.set(event.id, event.dateTime);
+                } else {
+                  console.log(`ℹ️  Already sent notification for: ${event.title}`);
+                }
+              }
+
+              /* ---------- EVENT MODIFIED ---------- */
+              if (change.type === 'modified') {
+                console.log(`🔄 Event modified: ${event.title}`);
+
+                // Get the previous notification record
+                const notificationDoc = await this.firestore
+                  .collection('event_notifications')
+                  .doc(event.id)
+                  .get();
+
+                if (notificationDoc.exists) {
+                  const lastNotifiedData = notificationDoc.data();
+                  const oldDateTime = lastNotifiedData.lastNotifiedDate;
+                  const newDateTime = event.dateTime;
+
+                  // Compare timestamps properly
+                  const oldTime = this.toTimestamp(oldDateTime);
+                  const newTime = this.toTimestamp(newDateTime);
+
+                  console.log(`   Old timestamp: ${oldTime}`);
+                  console.log(`   New timestamp: ${newTime}`);
+
+                  if (oldTime !== newTime) {
+                    console.log('   ✅ Date changed! Sending notification...');
+                    await this.sendEventDateChangedNotification(
+                      event,
+                      oldDateTime,
+                      newDateTime
+                    );
+                  } else {
+                    console.log('   ℹ️  Date unchanged, skipping notification');
+                  }
+                } else {
+                  console.log(`   ⚠️  No previous notification record found`);
+                }
+              }
+
+              /* ---------- EVENT DELETED ---------- */
+              if (change.type === 'removed') {
+                console.log(`🗑️  Event deleted: ${event.id}`);
+                this.eventCache.delete(event.id);
+              }
+
+            } catch (error) {
+              console.error('❌ Error processing event change:', error);
             }
           }
+        },
+        (error) => {
+          console.error('❌ Snapshot listener error:', error);
+          // Retry after 5 seconds
+          setTimeout(() => {
+            console.log('🔄 Restarting event listener...');
+            this.startEventListener();
+          }, 5000);
         }
-      });
-    }, (error) => {
-      console.error('❌ Firestore listener error:', error);
-    });
+      );
 
-    console.log('✅ Event listener started');
+    console.log('✅ Event listener started successfully');
+    return unsubscribe;
   }
 
-  /**
-   * Check if event already has a notification sent
-   */
-  async checkIfAlreadyNotified(eventId) {
-    try {
-      const snapshot = await this.firestore
-        .collection('notification_logs')
-        .where('eventId', '==', eventId)
-        .where('type', '==', 'new_event')
-        .limit(1)
-        .get();
-      
-      return !snapshot.empty;
-    } catch (error) {
-      console.error('Error checking notification status:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Mark event as notified
-   */
-  async markAsNotified(eventId) {
-    try {
-      await this.firestore.collection('event_notifications').add({
-        eventId,
-        notifiedAt: new Date(),
-        type: 'auto',
-      });
-    } catch (error) {
-      console.error('Error marking as notified:', error);
-    }
-  }
-
-  /**
-   * Schedule daily event reminders
-   */
+  /* =========================================================
+   * DAILY REMINDERS (CRON)
+   * =======================================================*/
   scheduleDailyReminders() {
-    // Run at 9 AM every day (Asia/Kathmandu time)
-    cron.schedule('0 9 * * *', async () => {
-      console.log('📅 Running daily event reminder check...');
-      
-      try {
-        const today = new Date();
-        const tomorrow = new Date(today);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        
-        // Get events happening today
-        const todaysEvents = await this.firestore
-          .collection('events')
-          .where('dateTime', '>=', today)
-          .where('dateTime', '<', tomorrow)
-          .where('isActive', '==', true)
-          .get();
-        
-        if (!todaysEvents.empty) {
-          const eventCount = todaysEvents.size;
-          const firstEvent = todaysEvents.docs[0].data();
-          
-          await this.sendToAll(
-            `📅 Today's Events (${eventCount})`,
-            `You have ${eventCount} event(s) today. First: ${firstEvent.title}`,
-            {
-              type: 'daily_digest',
-              eventCount: eventCount.toString(),
-              route: '/events',
-            }
-          );
-          
-          console.log(`✅ Daily digest sent for ${eventCount} events`);
-        }
-      } catch (error) {
-        console.error('❌ Error sending daily digest:', error);
-      }
-    }, {
-      scheduled: true,
-      timezone: "Asia/Kathmandu"
-    });
+    console.log('⏰ Scheduling daily reminders for 9:00 AM...');
 
-    console.log('✅ Daily reminders scheduled');
+    cron.schedule(
+      '0 9 * * *',
+      async () => {
+        console.log('🔔 Running daily reminder check...');
+        
+        try {
+          const now = new Date();
+          now.setHours(0, 0, 0, 0);
+          
+          const tomorrow = new Date(now);
+          tomorrow.setDate(tomorrow.getDate() + 2);
+          tomorrow.setHours(0, 0, 0, 0);
+
+          const snapshot = await this.firestore
+            .collection('events')
+            .where('isActive', '==', true)
+            .get();
+
+          const todayEvents = [];
+          const tomorrowEvents = [];
+
+          snapshot.forEach(doc => {
+            const event = { id: doc.id, ...doc.data() };
+            const eventDate = this.toDate(event.dateTime);
+            eventDate.setHours(0, 0, 0, 0);
+
+            if (eventDate.getTime() === now.getTime()) {
+              todayEvents.push(event);
+            } else if (eventDate.getTime() === (new Date(now.getTime() + 86400000)).getTime()) {
+              tomorrowEvents.push(event);
+            }
+          });
+
+          if (todayEvents.length > 0) {
+            await this.sendToAll(
+              `🔥 Events Today (${todayEvents.length})`,
+              todayEvents.map(e => `• ${e.title}`).join('\n').substring(0, 100),
+              { type: 'daily_reminder', route: 'events' }
+            );
+            console.log(`✅ Sent reminder for ${todayEvents.length} event(s) today`);
+          }
+
+          if (tomorrowEvents.length > 0) {
+            await this.sendToAll(
+              `📅 Tomorrow's Events (${tomorrowEvents.length})`,
+              tomorrowEvents.map(e => `• ${e.title}`).join('\n').substring(0, 100),
+              { type: 'daily_reminder', route: 'events' }
+            );
+            console.log(`✅ Sent reminder for ${tomorrowEvents.length} event(s) tomorrow`);
+          }
+
+          console.log('✅ Daily reminder check completed');
+        } catch (error) {
+          console.error('❌ Error in daily reminder:', error);
+        }
+      },
+      { timezone: 'Asia/Kathmandu' }
+    );
+
+    console.log('✅ Daily reminder scheduled successfully');
   }
 
-  /**
-   * Format date helper
-   */
+  /* =========================================================
+   * MANUAL TRIGGER - Send notification for specific event
+   * =======================================================*/
+  async sendEventNotification(eventId) {
+    try {
+      console.log(`📢 Manual trigger for event: ${eventId}`);
+      
+      const eventDoc = await this.firestore
+        .collection('events')
+        .doc(eventId)
+        .get();
+
+      if (!eventDoc.exists) {
+        throw new Error('Event not found');
+      }
+
+      const event = { id: eventDoc.id, ...eventDoc.data() };
+      await this.sendNewEventNotification(event);
+
+      return { success: true, message: 'Notification sent' };
+    } catch (error) {
+      console.error('❌ Error sending manual notification:', error);
+      throw error;
+    }
+  }
+
+  /* =========================================================
+   * HELPERS
+   * =======================================================*/
+  toDate(value) {
+    if (!value) return new Date();
+    if (value.toDate) return value.toDate();
+    if (value._seconds !== undefined) {
+      return new Date(value._seconds * 1000);
+    }
+    return new Date(value);
+  }
+
+  toTimestamp(value) {
+    if (!value) return 0;
+    if (value.toDate) return value.toDate().getTime();
+    if (value._seconds !== undefined) return value._seconds * 1000;
+    if (value instanceof Date) return value.getTime();
+    return new Date(value).getTime();
+  }
+
   formatEventDate(date) {
     const options = {
       weekday: 'short',
       month: 'short',
       day: 'numeric',
+      year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
     };
-    return date.toLocaleDateString('en-US', options);
+    return date.toLocaleString('en-US', options);
   }
 
-  /**
-   * Get notification statistics
-   */
   async getStats() {
     try {
-      const [
-        totalNotifications,
-        successCount,
-        errorCount,
-        recentNotifications
-      ] = await Promise.all([
-        this.firestore.collection('notification_logs').count().get(),
-        this.firestore.collection('notification_logs')
-          .where('success', '==', true).count().get(),
-        this.firestore.collection('notification_errors').count().get(),
-        this.firestore.collection('notification_logs')
-          .orderBy('sentAt', 'desc')
-          .limit(10)
-          .get(),
-      ]);
+      const logsSnapshot = await this.firestore
+        .collection('notification_logs')
+        .orderBy('sentAt', 'desc')
+        .limit(100)
+        .get();
+
+      const errorsSnapshot = await this.firestore
+        .collection('notification_errors')
+        .orderBy('sentAt', 'desc')
+        .limit(100)
+        .get();
 
       return {
-        total: totalNotifications.data().count,
-        successful: successCount.data().count,
-        errors: errorCount.data().count,
-        successRate: totalNotifications.data().count > 0 
-          ? (successCount.data().count / totalNotifications.data().count * 100).toFixed(1)
-          : 0,
-        recent: recentNotifications.docs.map(doc => ({
+        totalSent: logsSnapshot.size,
+        totalErrors: errorsSnapshot.size,
+        recentLogs: logsSnapshot.docs.slice(0, 10).map(doc => ({
           id: doc.id,
           ...doc.data(),
-          sentAt: doc.data().sentAt?.toDate()?.toISOString(),
+        })),
+        recentErrors: errorsSnapshot.docs.slice(0, 10).map(doc => ({
+          id: doc.id,
+          ...doc.data(),
         })),
       };
     } catch (error) {
-      console.error('Error getting stats:', error);
-      throw error;
+      console.error('❌ Error getting stats:', error);
+      return { error: error.message };
     }
   }
 }
