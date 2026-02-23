@@ -1,7 +1,6 @@
 const admin = require('firebase-admin');
 const path = require('path');
 
-// Initialize Firebase Admin SDK
 let firebaseInitialized = false;
 
 function initializeFirebase() {
@@ -10,26 +9,43 @@ function initializeFirebase() {
   }
 
   try {
-    // For development: Use service account key
-    // For production: Use environment variables
-    const serviceAccount = process.env.FIREBASE_CREDENTIALS 
-      ? JSON.parse(process.env.FIREBASE_CREDENTIALS)
-      : require(path.join(__dirname, '../serviceAccountKey.json'));
+    let serviceAccount;
+
+    if (process.env.FIREBASE_CREDENTIALS) {
+      // Production: use environment variable
+      serviceAccount = JSON.parse(process.env.FIREBASE_CREDENTIALS);
+      console.log('🔑 Using FIREBASE_CREDENTIALS environment variable');
+    } else if (process.env.NODE_ENV === 'production') {
+      // In production, never fall back to a file
+      throw new Error(
+        'FIREBASE_CREDENTIALS environment variable is required in production. ' +
+        'Set it to the full contents of your serviceAccountKey.json as one line.'
+      );
+    } else {
+      // Development only: use local file
+      const keyPath = path.join(__dirname, '../serviceAccountKey.json');
+      serviceAccount = require(keyPath);
+      console.warn(
+        '⚠️  DEV MODE: Using local serviceAccountKey.json. ' +
+        'Never commit this file or use it in production.'
+      );
+    }
 
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      databaseURL: process.env.FIREBASE_DATABASE_URL || 
-                  `https://${serviceAccount.project_id}.firebaseio.com`,
-      storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 
-                    `${serviceAccount.project_id}.appspot.com`,
+      databaseURL:
+        process.env.FIREBASE_DATABASE_URL ||
+        `https://${serviceAccount.project_id}-default-rtdb.firebaseio.com`,
+      storageBucket:
+        process.env.FIREBASE_STORAGE_BUCKET ||
+        `${serviceAccount.project_id}.appspot.com`,
     });
 
-    console.log('✅ Firebase Admin SDK initialized');
+    console.log('✅ Firebase Admin SDK initialized successfully');
     firebaseInitialized = true;
-    
     return admin;
   } catch (error) {
-    console.error('❌ Failed to initialize Firebase:', error);
+    console.error('❌ Failed to initialize Firebase:', error.message);
     throw error;
   }
 }
@@ -37,27 +53,19 @@ function initializeFirebase() {
 module.exports = {
   initializeFirebase,
   getFirebaseAdmin: () => {
-    if (!firebaseInitialized) {
-      initializeFirebase();
-    }
+    if (!firebaseInitialized) initializeFirebase();
     return admin;
   },
   getFirestore: () => {
-    if (!firebaseInitialized) {
-      initializeFirebase();
-    }
+    if (!firebaseInitialized) initializeFirebase();
     return admin.firestore();
   },
   getMessaging: () => {
-    if (!firebaseInitialized) {
-      initializeFirebase();
-    }
+    if (!firebaseInitialized) initializeFirebase();
     return admin.messaging();
   },
   getAuth: () => {
-    if (!firebaseInitialized) {
-      initializeFirebase();
-    }
+    if (!firebaseInitialized) initializeFirebase();
     return admin.auth();
   },
 };
