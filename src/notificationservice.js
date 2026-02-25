@@ -6,10 +6,6 @@ class NotificationService {
     this.firestore = getFirestore();
     this.messaging = getMessaging();
     this.eventCache = new Map();
-
-    // BUG FIX 1: Track server start time.
-    // Firestore onSnapshot fires for ALL existing docs as 'added' on first load.
-    // We use isInitialLoad to skip that first batch entirely.
     this.serverStartTime = new Date();
     this.isInitialLoad = true;
   }
@@ -89,11 +85,8 @@ class NotificationService {
       const formattedDate = this.formatEventDate(eventDate);
 
       console.log(`📢 Sending NEW EVENT notification: ${event.title}`);
+      console.log(`   Date: ${formattedDate}`);
 
-      // BUG FIX 4: Write the Firestore record BEFORE sending the notification.
-      // Previously the record was written after sending. If the server crashed
-      // between send and write, the next restart would send duplicate notifications
-      // for the same event because no record existed yet.
       await this.firestore.collection('event_notifications').doc(event.id).set({
         eventId: event.id,
         eventTitle: event.title,
@@ -120,29 +113,33 @@ class NotificationService {
   }
 
   /* =========================================================
-   * EVENT DATE CHANGED NOTIFICATION
+   * EVENT DATE CHANGED NOTIFICATION - FIXED
    * ======================================================= */
   async sendEventDateChangedNotification(event, oldDateTime, newDateTime) {
     try {
+      // ✅ FIX: Convert to proper Date objects
       const oldDate = this.toDate(oldDateTime);
       const newDate = this.toDate(newDateTime);
+      
+      // ✅ FIX: Format dates properly
       const oldFormatted = this.formatEventDate(oldDate);
       const newFormatted = this.formatEventDate(newDate);
 
       console.log(`📅 Sending DATE CHANGED notification for: ${event.title}`);
-      console.log(`   Old: ${oldFormatted}`);
-      console.log(`   New: ${newFormatted}`);
+      console.log(`   Old Date: ${oldFormatted}`);
+      console.log(`   New Date: ${newFormatted}`);
 
+      // ✅ FIX: Show BOTH dates in notification body
       await this.sendToAll(
         `⏰ Event Rescheduled: ${event.title}`,
-        `New Date: ${newFormatted}\nPrevious: ${oldFormatted}`,
+        `New: ${newFormatted}\nOld: ${oldFormatted}`,  // ✅ Both dates visible
         {
           type: 'event_rescheduled',
           eventId: String(event.id),
           route: 'events',
           imageUrl: event.imageUrl || '',
-          oldDate: oldFormatted,
-          newDate: newFormatted,
+          oldDate: oldFormatted,  // ✅ Include in data
+          newDate: newFormatted,  // ✅ Include in data
         }
       );
 
@@ -162,11 +159,12 @@ class NotificationService {
       console.log('✅ Date changed notification sent successfully');
     } catch (error) {
       console.error('❌ Error sending date changed notification:', error.message);
+      console.error('   Error details:', error);
     }
   }
 
   /* =========================================================
-   * FIRESTORE REAL-TIME EVENT LISTENER — ALL BUGS FIXED
+   * FIRESTORE REAL-TIME EVENT LISTENER
    * ======================================================= */
   startEventListener() {
     console.log('👂 Starting Firestore event listener...');
@@ -178,15 +176,7 @@ class NotificationService {
           const changes = snapshot.docChanges();
           if (changes.length === 0) return;
 
-          // ─────────────────────────────────────────────────────────
-          // BUG FIX 1: INITIAL LOAD SKIP
-          // When the server starts, Firestore immediately fires a
-          // snapshot with ALL existing events marked as 'added'.
-          // Without this fix, it would send "New Event" notifications
-          // for every single event already in your database on every
-          // server restart. We skip this first batch entirely and just
-          // populate the cache for future comparisons.
-          // ─────────────────────────────────────────────────────────
+          // Skip initial load
           if (this.isInitialLoad) {
             console.log(
               `🔄 Initial load: caching ${changes.length} existing event(s) — skipping notifications`
@@ -208,11 +198,7 @@ class NotificationService {
             try {
               const event = { id: change.doc.id, ...change.doc.data() };
 
-              // ───────────────────────────────────────────────────
-              // BUG FIX 2: VALIDATE REQUIRED FIELDS
-              // Missing fields caused silent failures — the code
-              // would crash partway through with no useful error.
-              // ───────────────────────────────────────────────────
+              // Validate required fields
               if (!event.title) {
                 console.warn(`⚠️  Event ${event.id} missing title — skipping`);
                 continue;
@@ -249,7 +235,6 @@ class NotificationService {
                   this.eventCache.set(event.id, event.dateTime);
                 } else {
                   console.log(`ℹ️  Already notified for: ${event.title} — skipping`);
-                  // Keep cache in sync even if we skip
                   this.eventCache.set(event.id, existing.data().lastNotifiedDate);
                 }
               }
@@ -258,18 +243,9 @@ class NotificationService {
               if (change.type === 'modified') {
                 console.log(`🔄 Event modified: ${event.title}`);
 
-                // ─────────────────────────────────────────────────
-                // BUG FIX 3: TWO-LAYER OLD DATE LOOKUP
-                // Previously only checked Firestore for the old date.
-                // If the Firestore record was missing (e.g. write failed
-                // during a previous new-event notification), modified
-                // events were silently skipped with "no previous record".
-                // Now we check the in-memory cache first, then Firestore,
-                // and if neither has a record we treat it as a new event.
-                // ─────────────────────────────────────────────────
                 let oldDateTime = null;
 
-                // Layer 1: in-memory cache (fastest)
+                // Layer 1: in-memory cache
                 if (this.eventCache.has(event.id)) {
                   oldDateTime = this.eventCache.get(event.id);
                   console.log(`   📋 Got old date from memory cache`);
@@ -287,7 +263,7 @@ class NotificationService {
                   }
                 }
 
-                // Layer 3: no record anywhere — treat as new event
+                // Layer 3: no record — treat as new event
                 if (!oldDateTime) {
                   console.log(
                     `   ⚠️  No previous record for ${event.title} — treating as new`
@@ -304,6 +280,7 @@ class NotificationService {
                 console.log(`   Old timestamp: ${oldTime}`);
                 console.log(`   New timestamp: ${newTime}`);
 
+                // ✅ FIX: Compare timestamps properly
                 if (oldTime !== newTime) {
                   console.log('   ✅ Date changed — sending rescheduled notification...');
                   await this.sendEventDateChangedNotification(
@@ -314,7 +291,6 @@ class NotificationService {
                   this.eventCache.set(event.id, event.dateTime);
                 } else {
                   console.log('   ℹ️  Date unchanged — no notification needed');
-                  // BUG FIX 5: Always keep cache in sync even when skipping
                   this.eventCache.set(event.id, event.dateTime);
                 }
               }
@@ -335,7 +311,6 @@ class NotificationService {
         },
         (error) => {
           console.error('❌ Snapshot listener error:', error.message);
-          // Reset so reconnect initial batch is also skipped
           this.isInitialLoad = true;
           setTimeout(() => {
             console.log('🔄 Restarting event listener...');
@@ -349,7 +324,7 @@ class NotificationService {
   }
 
   /* =========================================================
-   * DAILY REMINDERS — runs at 9:00 AM Asia/Kathmandu
+   * DAILY REMINDERS
    * ======================================================= */
   scheduleDailyReminders() {
     console.log('⏰ Scheduling daily reminders at 9:00 AM Asia/Kathmandu...');
@@ -425,7 +400,7 @@ class NotificationService {
   }
 
   /* =========================================================
-   * MANUAL TRIGGER — send notification for a specific event
+   * MANUAL TRIGGER
    * ======================================================= */
   async sendEventNotification(eventId) {
     console.log(`📢 Manual trigger for event: ${eventId}`);
@@ -479,13 +454,7 @@ class NotificationService {
    * PRIVATE HELPERS
    * ======================================================= */
 
-  /**
-   * Builds a complete FCM message object.
-   * All data values are stringified (FCM requirement).
-   * Empty imageUrl is omitted to avoid FCM errors.
-   */
   _buildMessage({ title, body, data = {}, target }) {
-    // FCM requires all data values to be strings
     const fcmData = {};
     for (const [k, v] of Object.entries(data)) {
       fcmData[k] = String(v);
@@ -495,7 +464,6 @@ class NotificationService {
     fcmData.timestamp = new Date().toISOString();
     fcmData.click_action = 'FLUTTER_NOTIFICATION_CLICK';
 
-    // FCM rejects empty string for image — use undefined to omit the field
     const imageUrl =
       data.imageUrl && String(data.imageUrl).trim() !== ''
         ? String(data.imageUrl)
@@ -539,30 +507,73 @@ class NotificationService {
     }
   }
 
+  // ✅ FIX: Improved date conversion
   toDate(value) {
     if (!value) return new Date();
-    if (typeof value.toDate === 'function') return value.toDate();
-    if (value._seconds !== undefined) return new Date(value._seconds * 1000);
+    
+    // Firestore Timestamp object
+    if (typeof value.toDate === 'function') {
+      return value.toDate();
+    }
+    
+    // Firestore Timestamp proto format
+    if (value._seconds !== undefined) {
+      return new Date(value._seconds * 1000);
+    }
+    
+    // Already a Date object
+    if (value instanceof Date) {
+      return value;
+    }
+    
+    // ISO string or timestamp
     return new Date(value);
   }
 
+  // ✅ FIX: Improved timestamp conversion
   toTimestamp(value) {
     if (!value) return 0;
-    if (typeof value.toDate === 'function') return value.toDate().getTime();
-    if (value._seconds !== undefined) return value._seconds * 1000;
-    if (value instanceof Date) return value.getTime();
+    
+    // Firestore Timestamp
+    if (typeof value.toDate === 'function') {
+      return value.toDate().getTime();
+    }
+    
+    // Firestore proto format
+    if (value._seconds !== undefined) {
+      return value._seconds * 1000;
+    }
+    
+    // Date object
+    if (value instanceof Date) {
+      return value.getTime();
+    }
+    
+    // Fallback
     return new Date(value).getTime();
   }
 
+  // ✅ FIX: Better date formatting
   formatEventDate(date) {
-    return date.toLocaleString('en-US', {
-      weekday: 'short',
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+    try {
+      // Ensure we have a valid Date object
+      const d = date instanceof Date ? date : this.toDate(date);
+      
+      // Format for Nepal timezone (Asia/Kathmandu)
+      return d.toLocaleString('en-US', {
+        weekday: 'short',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true,
+        timeZone: 'Asia/Kathmandu'
+      });
+    } catch (error) {
+      console.error('Error formatting date:', error);
+      return date.toString();
+    }
   }
 }
 
